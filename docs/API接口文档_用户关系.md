@@ -67,7 +67,7 @@
         "zgId": "zg_123",
         "gender": "male",
         "birthday": "1995-01-01",
-        "school": "Tongji",
+        "school": "示例大学",
         "phone": "",
         "email": "",
         "tagJson": "{\"领域\":\"AI\"}"

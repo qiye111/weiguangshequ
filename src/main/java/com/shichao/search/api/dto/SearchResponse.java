@@ -1,0 +1,13 @@
+package com.shichao.search.api.dto;
+
+import com.shichao.knowpost.api.dto.FeedItemResponse;
+import java.util.List;
+
+/**
+ * 搜索响应：包含结果列表与分页游标。
+ */
+public record SearchResponse(
+        List<FeedItemResponse> items,
+        String nextAfter,
+        boolean hasMore
+) {}

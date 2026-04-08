@@ -452,5 +452,5 @@ N[注意：需在 OSS CORS 暴露 ETag] --- D
     - 仅当知文为“已发布 + 公开”时执行；否则返回 `0` 并写告警日志。
 
 - 备注：
-  - 向量库索引名来源于配置：`spring.ai.vectorstore.elasticsearch.index-name`（如：`zhiguang-ai-index`）。
+  - 向量库索引名来源于配置：`spring.ai.vectorstore.elasticsearch.index-name`（如：`weiguang-ai-index`）。
   - Elasticsearch 连接从 `spring.elasticsearch.uris` 获取；可选 `username/password` 用于基本认证。

@@ -1,7 +1,7 @@
 
 spring:
   application:
-    name: zhiguang-auth
+    name: weiguang-auth
   datasource:
     url: jdbc:mysql://localhost:3306/zhiguang?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
     username: root
@@ -61,7 +61,7 @@ spring:
     vectorstore:
       elasticsearch:
         initialize-schema: true
-        index-name: zhiguang-ai-index
+        index-name: weiguang-ai-index
         dimensions: 1536 # 一定要和上面的 dimensions 一致，不然会报错
   elasticsearch:
     uris: http://localhost:9200
@@ -73,7 +73,7 @@ canal:
   destination: example
   username: "canal"
   password: "Canal@123456"
-  filter: zhiguang\.outbox
+  filter: weiguang\.outbox
   batchSize: 1000
   intervalMs: 1000
 
@@ -97,8 +97,8 @@ mybatis:
 
 auth:
   jwt:
-    issuer: zhiguang
-    key-id: zhiguang-key
+    issuer: weiguang
+    key-id: weiguang-key
     private-key: classpath:keys/private.pem
     public-key: classpath:keys/public.pem
     access-token-ttl: PT15M
@@ -116,12 +116,12 @@ auth:
 logging:
   level:
     root: INFO
-    '[com.tongji]': DEBUG
+    '[com.shichao]': DEBUG
 
 oss:
   endpoint: oss-cn-beijing.aliyuncs.com
-  access-key-id: **********
-  access-key-secret: **********
+  access-key-id: "**********"
+  access-key-secret: "**********"
   bucket: weiguang-lsc
   public-domain: ${OSS_PUBLIC_DOMAIN:}
   folder: avatars

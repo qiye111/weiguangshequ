@@ -321,7 +321,7 @@ Redis 存储键格式：`auth:code:{scene}:{identifier}`，哈希字段包括：
       "bio": "个人描述",
       "gender": "MALE|FEMALE|OTHER|UNKNOWN",
       "birthday": "2000-01-01",
-      "zgId": "zhiguang_1234",
+      "zgId": "weiguang_1234",
       "school": "同济大学",
       "tagJson": "[\"Java\",\"后端\"]"
     }
@@ -333,7 +333,7 @@ Redis 存储键格式：`auth:code:{scene}:{identifier}`，哈希字段包括：
       "nickname": "新的昵称",
       "avatar": "https://cdn.example.com/avatars/1001-1710000000000.png",
       "bio": "个人描述",
-      "zgId": "zhiguang_1234",
+      "zgId": "weiguang_1234",
       "gender": "MALE",
       "birthday": "2000-01-01",
       "school": "同济大学",
@@ -345,7 +345,7 @@ Redis 存储键格式：`auth:code:{scene}:{identifier}`，哈希字段包括：
   - 字段说明：
     - `tagJson`：作者领域标签（JSON 字符串），持久化到 `users.tags_json`，与首页 Feed 返回的 `tagJson` 含义保持一致。
   - 可能错误：
-    - `ZGID_EXISTS`：知光号已存在
+    - `ZGID_EXISTS`：微光号已存在
     - `BAD_REQUEST`：请求不合法（未提交任何更新字段等）
 
 - 路径：`POST /api/v1/profile/avatar`
