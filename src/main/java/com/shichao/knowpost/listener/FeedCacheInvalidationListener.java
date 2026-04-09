@@ -18,7 +18,7 @@ import java.util.*;
  *
  * <p>职责：</p>
  * - 监听点赞/收藏等计数事件（仅处理实体类型为 "knowpost"）；
- * - 根据“页面反向索引”（`feed:public:index:{eid}:{hour}`）定位受影响页面，
+ * - 根据"页面反向索引"（`feed:public:index:{eid}:{hour}`）定位受影响页面，
  *   同步更新本地 Caffeine 缓存与 Redis 页面 JSON（保持 TTL 不变）；
  * - 同步创作者收到的点赞/收藏用户维度计数（UserCounterService）。
  *
@@ -32,17 +32,20 @@ import java.util.*;
 public class FeedCacheInvalidationListener {
 
     private final Cache<String, FeedPageResponse> feedPublicCache;
+    private final Cache<String, FeedPageResponse> feedMineCache;
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
     private final com.shichao.counter.service.UserCounterService userCounterService;
     private final com.shichao.knowpost.mapper.KnowPostMapper knowPostMapper;
 
     public FeedCacheInvalidationListener(@Qualifier("feedPublicCache") Cache<String, FeedPageResponse> feedPublicCache,
+                                         @Qualifier("feedMineCache") Cache<String, FeedPageResponse> feedMineCache,
                                          StringRedisTemplate redis,
                                          ObjectMapper objectMapper,
                                          com.shichao.counter.service.UserCounterService userCounterService,
                                          com.shichao.knowpost.mapper.KnowPostMapper knowPostMapper) {
         this.feedPublicCache = feedPublicCache;
+        this.feedMineCache = feedMineCache;
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.userCounterService = userCounterService;
@@ -54,7 +57,7 @@ public class FeedCacheInvalidationListener {
      *
      * <p>流程：</p>
      * - 仅处理实体类型为 "knowpost" 的 like/fav 事件；
-     * - 若可解析到内容的创作者 ID，则同步其“收到的点赞/收藏”计数；
+     * - 若可解析到内容的创作者 ID，则同步其"收到的点赞/收藏"计数；
      * - 通过最近两小时的反向索引集合定位受影响页面：
      *   - 更新本地 Caffeine 页缓存（保留 liked/faved 标志）；
      *   - 更新 Redis 页缓存（不携带用户态标志，保持 TTL）。
@@ -67,10 +70,10 @@ public class FeedCacheInvalidationListener {
         }
 
         String metric = event.getMetric();
-        if ("like".equals(metric) || "fav".equals(metric)) {
-            String eid = event.getEntityId();
-            int delta = event.getDelta();
+        String eid = event.getEntityId();
+        int delta = event.getDelta();
 
+        if ("like".equals(metric) || "fav".equals(metric)) {
             try {
                 KnowPost post = knowPostMapper.findById(Long.valueOf(eid));
                 if (post != null && post.getCreatorId() != null) {
@@ -118,6 +121,9 @@ public class FeedCacheInvalidationListener {
                     redis.opsForSet().remove("feed:public:index:" + eid + ":" + hourSlot, key);
                 }
             }
+
+            // 同步更新作者的"我的发布"缓存（feed:mine:{authorId}:*）
+            invalidateMineFeedCacheForPost(eid, metric, delta);
         }
     }
 
@@ -184,6 +190,52 @@ public class FeedCacheInvalidationListener {
                 redis.opsForValue().set(key, json, java.time.Duration.ofSeconds(ttl));
             } else {
                 redis.opsForValue().set(key, json);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * 当内容被点赞/收藏时，更新作者"我的发布"缓存中的计数。
+     * 通过查找 feed:mine:{creatorId}:* 模式的缓存并更新对应条目的计数。
+     *
+     * @param eid 内容 ID
+     * @param metric 计数类型（like/fav）
+     * @param delta 变化量
+     */
+    private void invalidateMineFeedCacheForPost(String eid, String metric, int delta) {
+        try {
+            // 1. 查询内容的创作者
+            KnowPost post = knowPostMapper.findById(Long.valueOf(eid));
+            if (post == null || post.getCreatorId() == null) {
+                return;
+            }
+            long creatorId = post.getCreatorId();
+            String minePrefix = "feed:mine:" + creatorId + ":";
+
+            // 2. 查找所有该用户的"我的发布"缓存键
+            Set<String> mineKeys = redis.keys(minePrefix + "*");
+            if (mineKeys == null || mineKeys.isEmpty()) {
+                return;
+            }
+
+            // 3. 更新每个缓存页面中的计数
+            for (String key : mineKeys) {
+                // 更新本地缓存
+                FeedPageResponse local = feedMineCache.getIfPresent(key);
+                if (local != null) {
+                    FeedPageResponse updatedLocal = adjustPageCounts(local, eid, metric, delta, true);
+                    feedMineCache.put(key, updatedLocal);
+                }
+
+                // 更新 Redis 缓存
+                String cached = redis.opsForValue().get(key);
+                if (cached != null) {
+                    try {
+                        FeedPageResponse resp = objectMapper.readValue(cached, FeedPageResponse.class);
+                        FeedPageResponse updated = adjustPageCounts(resp, eid, metric, delta, false);
+                        writePageJsonKeepingTtl(key, updated);
+                    } catch (Exception ignored) {}
+                }
             }
         } catch (Exception ignored) {}
     }

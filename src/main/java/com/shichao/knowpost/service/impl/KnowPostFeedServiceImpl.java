@@ -23,7 +23,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class KnowPostFeedServiceImpl implements KnowPostFeedService {
@@ -497,7 +500,7 @@ public class KnowPostFeedServiceImpl implements KnowPostFeedService {
 
 
     /**
-     * 根据热点级别动态延长“我的发布”页面缓存 TTL。
+     * 根据热点级别动态延长"我的发布"页面缓存 TTL。
      * @param key 页面缓存 Key
      */
     private void maybeExtendTtlMine (String key) {
@@ -507,5 +510,97 @@ public class KnowPostFeedServiceImpl implements KnowPostFeedService {
         if (currentTtl < target) {
             redis.expire(key, Duration.ofSeconds(target));
         }
+    }
+
+    // ==================== 缓存失效方法（按设计文档实现）====================
+
+    /**
+     * 公共 Feed 双删模式：先立即删除，再延迟二次删除。
+     * 防止并发回源时旧值回写造成短暂不一致。
+     */
+    @Override
+    public void invalidatePublicFeedCache() {
+        // 第一次删除：立即执行
+        doInvalidatePublicFeed();
+
+        // 第二次删除：延迟 50ms 后执行（避免并发窗口期旧值回写）
+        // 使用 ScheduledExecutorService 替代 CompletableFuture.delayedExecutor 确保兼容性
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+            .schedule(this::doInvalidatePublicFeed, 50, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 执行公共 Feed 缓存的实际删除操作。
+     * 清理 L2（本地）→ L1（Redis 骨架）→ 页面缓存。
+     */
+    private void doInvalidatePublicFeed() {
+        // 1. 清理本地 L2 缓存（Caffeine）- 清除所有公共 Feed 页面
+        feedPublicCache.invalidateAll();
+
+        // 2. 清理 Redis 中的页面缓存（feed:public:*）
+        Set<String> pageKeys = redis.keys("feed:public:*");
+        if (pageKeys != null && !pageKeys.isEmpty()) {
+            redis.delete(pageKeys);
+        }
+
+        // 3. 清理 L1 骨架缓存（feed:public:ids:*）和反向索引
+        Set<String> idsKeys = redis.keys("feed:public:ids:*");
+        if (idsKeys != null && !idsKeys.isEmpty()) {
+            redis.delete(idsKeys);
+        }
+
+        // 4. 清理页面集合索引
+        redis.delete("feed:public:pages");
+
+        // 5. 清理内容反向索引（feed:public:index:*）
+        Set<String> indexKeys = redis.keys("feed:public:index:*");
+        if (indexKeys != null && !indexKeys.isEmpty()) {
+            redis.delete(indexKeys);
+        }
+
+        // 6. 重置热度计数
+        resetHotKey("feed:public");
+
+        int totalDeleted = (pageKeys != null ? pageKeys.size() : 0)
+                         + (idsKeys != null ? idsKeys.size() : 0)
+                         + (indexKeys != null ? indexKeys.size() : 0);
+        log.info("feed.public cache invalidated, totalKeys={}", totalDeleted);
+    }
+
+    /**
+     * 我的 Feed 前缀批量清理：按用户维度清理对应前缀键。
+     * 保证个人列表的及时反映。
+     * @param userId 用户 ID
+     */
+    @Override
+    public void invalidateMineFeedCache(long userId) {
+        String prefix = "feed:mine:" + userId + ":";
+
+        // 1. 清理本地 L2 缓存（Caffeine）- 遍历匹配前缀
+        feedMineCache.asMap().keySet().stream()
+            .filter(k -> k.startsWith(prefix))
+            .forEach(feedMineCache::invalidate);
+
+        // 2. 清理 Redis 缓存（keys 匹配前缀）
+        // 生产环境建议使用 SCAN 替代 KEYS 防止阻塞
+        Set<String> keys = redis.keys(prefix + "*");
+        if (keys != null && !keys.isEmpty()) {
+            redis.delete(keys);
+        }
+
+        // 3. 重置该用户的热度计数
+        resetHotKey(prefix);
+
+        log.info("feed.mine cache invalidated, userId={}, keys={}", userId, keys != null ? keys.size() : 0);
+    }
+
+    /**
+     * 重置指定缓存键的热度计数。
+     * 避免旧热点持续影响缓存策略。
+     * @param pageKey 缓存键
+     */
+    @Override
+    public void resetHotKey(String pageKey) {
+        hotKey.reset(pageKey);
     }
 }

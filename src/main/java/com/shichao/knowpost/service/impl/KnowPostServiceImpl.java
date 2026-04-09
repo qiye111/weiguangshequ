@@ -2,6 +2,7 @@ package com.shichao.knowpost.service.impl;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.shichao.counter.service.UserCounterService;
+import com.shichao.knowpost.service.KnowPostFeedService;
 import com.shichao.knowpost.service.KnowPostService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -51,6 +52,7 @@ public class KnowPostServiceImpl implements KnowPostService {
     private static final int DETAIL_LAYOUT_VER = 1;
     private final ConcurrentHashMap<String, Object> singleFlight = new ConcurrentHashMap<>();
     private final RagIndexService ragIndexService;
+    private final KnowPostFeedService feedService;
 
     // 手动编写构造器，Spring的@Qualifier直接标注在参数上（核心）
     public KnowPostServiceImpl(
@@ -63,7 +65,8 @@ public class KnowPostServiceImpl implements KnowPostService {
             StringRedisTemplate redis,
             @Qualifier("knowPostDetailCache") Cache<String, KnowPostDetailResponse> knowPostDetailCache,
             HotKeyDetector hotKey,
-            RagIndexService ragIndexService
+            RagIndexService ragIndexService,
+            KnowPostFeedService feedService
     ) {
         this.mapper = mapper;
         this.idGen = idGen;
@@ -75,6 +78,7 @@ public class KnowPostServiceImpl implements KnowPostService {
         this.knowPostDetailCache = knowPostDetailCache; // 带@Qualifier的参数赋值
         this.hotKey = hotKey;
         this.ragIndexService = ragIndexService;
+        this.feedService = feedService;
     }
     /**
      * 创建草稿并返回新 ID。
@@ -163,24 +167,39 @@ public class KnowPostServiceImpl implements KnowPostService {
 
     /**
      * 发布草稿，设置状态与发布时间。
+     * 发布后会触发 Feed 缓存失效，确保新内容及时可见。
      */
     @Transactional
     public void publish(long creatorId, long id) {
+        // 1. 更新数据库
         int updated = mapper.publish(id, creatorId);
 
         if (updated == 0) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "草稿不存在或无权限");
         }
+
+        // 2. 失效"我的 Feed"缓存（前缀批量清理）
+        feedService.invalidateMineFeedCache(creatorId);
+
+        // 3. 如果内容公开可见，失效公共 Feed 缓存（双删模式在内部实现）
+        KnowPost post = mapper.findById(id);
+        if (post != null && "public".equals(post.getVisible())) {
+            feedService.invalidatePublicFeedCache();
+        }
+
+        // 4. 增加用户发帖计数
         try {
             userCounterService.incrementPosts(creatorId, 1);
         } catch (Exception ignored) {}
 
-        // 发布成功后触发一次预索引，减少首次问答冷启动
+        // 5. 发布成功后触发一次预索引，减少首次问答冷启动
         try {
             ragIndexService.ensureIndexed(id);
         } catch (Exception e) {
             log.warn("Pre-index after publish failed, post {}: {}", id, e.getMessage());
         }
+
+        log.info("knowpost published, id={}, creatorId={}, visible={}", id, creatorId, post != null ? post.getVisible() : "unknown");
     }
 
     /**
@@ -188,7 +207,8 @@ public class KnowPostServiceImpl implements KnowPostService {
      */
     @Transactional
     public void updateTop(long creatorId, long id, boolean isTop) {
-        invalidateCache(id);
+        // 失效所有相关缓存（详情 + Feed）
+        invalidateAllCache(id, creatorId);
 
         int updated = mapper.updateTop(id, creatorId, isTop);
 
@@ -196,7 +216,8 @@ public class KnowPostServiceImpl implements KnowPostService {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "草稿不存在或无权限");
         }
 
-        invalidateCache(id);
+        // 再次失效所有相关缓存（双删模式）
+        invalidateAllCache(id, creatorId);
     }
 
     /**
@@ -208,7 +229,8 @@ public class KnowPostServiceImpl implements KnowPostService {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "可见性取值非法");
         }
 
-        invalidateCache(id);
+        // 失效所有相关缓存（详情 + Feed）
+        invalidateAllCache(id, creatorId);
 
         int updated = mapper.updateVisibility(id, creatorId, visible);
 
@@ -216,7 +238,8 @@ public class KnowPostServiceImpl implements KnowPostService {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "草稿不存在或无权限");
         }
 
-        invalidateCache(id);
+        // 再次失效所有相关缓存（双删模式）
+        invalidateAllCache(id, creatorId);
     }
 
     /**
@@ -224,14 +247,16 @@ public class KnowPostServiceImpl implements KnowPostService {
      */
     @Transactional
     public void delete(long creatorId, long id) {
-        invalidateCache(id);
+        // 失效所有相关缓存（详情 + Feed）
+        invalidateAllCache(id, creatorId);
 
         int updated = mapper.softDelete(id, creatorId);
         if (updated == 0) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "草稿不存在或无权限");
         }
 
-        invalidateCache(id);
+        // 再次失效所有相关缓存（双删模式）
+        invalidateAllCache(id, creatorId);
     }
 
     private boolean isValidVisible(String visible) {
@@ -530,6 +555,31 @@ public class KnowPostServiceImpl implements KnowPostService {
         redis.delete(pageKey);
 
         knowPostDetailCache.invalidate(pageKey);
+    }
+
+    /**
+     * 统一失效所有相关缓存：详情页 + Feed 列表 + L0 碎片。
+     * 按照设计文档实现三级缓存（L0/L1/L2）级联失效。
+     * @param id 知文 ID
+     * @param creatorId 创作者 ID
+     */
+    private void invalidateAllCache(long id, long creatorId) {
+        // 1. 失效详情页缓存
+        invalidateCache(id);
+
+        // 2. 失效"我的 Feed"缓存（用户维度前缀清理）
+        feedService.invalidateMineFeedCache(creatorId);
+
+        // 3. 如果内容是公开的，失效公共 Feed 缓存
+        KnowPost post = mapper.findById(id);
+        if (post != null && "public".equals(post.getVisible())) {
+            feedService.invalidatePublicFeedCache();
+        }
+
+        // 4. 失效 L0 碎片缓存（feed:item:{id}）
+        redis.delete("feed:item:" + id);
+
+        log.info("knowpost cache invalidated, id={}, creatorId={}", id, creatorId);
     }
 
     private List<String> parseStringArray(String json) {
